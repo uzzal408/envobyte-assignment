@@ -43,6 +43,8 @@ class Kernel extends ConsoleKernel
     protected function schedule(Schedule $schedule)
     {
         $this->scheduleCommand($schedule, 'queue:prune-batches', 'daily');
+        $this->scheduleCommand($schedule, 'imports:recover', 'hourly');
+        $this->scheduleCommand($schedule, 'imports:check-failure-rate', 'hourly');
         $this->scheduleCommand($schedule, 'send:reminders', 'hourly');
         $this->scheduleCommand($schedule, 'send:stay_in_touch', 'hourly');
         $this->scheduleCommand($schedule, 'monica:davclients', 'hourly');

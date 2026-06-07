@@ -11,7 +11,7 @@ waitfordb() {
     attempts=0
     max_attempts=30
     while [ $attempts -lt $max_attempts ]; do
-        busybox nc -w 1 "${HOST}:${PORT}" && break
+        busybox nc -w 1 "${HOST}" "${PORT}" && break
         echo "Waiting for ${HOST}:${PORT}..."
         sleep 1
         let "attempts=attempts+1"
@@ -57,6 +57,12 @@ if expr "$1" : "apache" 1>/dev/null || [ "$1" = "php-fpm" ]; then
         ${ARTISAN} passport:client --personal --no-interaction
         echo "! Please be careful to backup $MONICADIR/storage/oauth-public.key and $MONICADIR/storage/oauth-private.key files !"
     fi
+
+    # The artisan commands above run as root and may create root-owned files
+    # (e.g. storage/logs/laravel.log), which the www-data Apache worker then
+    # cannot write. Re-assert ownership after they run.
+    chown -R www-data:www-data ${STORAGE} ${MONICADIR}/bootstrap/cache
+    chmod -R g+rw ${STORAGE} ${MONICADIR}/bootstrap/cache
 
 fi
 

@@ -1,0 +1,92 @@
+###
+### ~ Monica dev docker-compose
+###
+### This file is used for dev purpose.
+### The standard monica image definition will be found here: https://github.com/monicahq/docker
+###
+
+version: '3'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: scripts/docker/Dockerfile
+    image: monica:dev
+    depends_on:
+      - mysql
+      - redis
+    ports:
+      # 8080 is taken by another local service (Jenkins); use 8090 on the host.
+      - 8090:80
+    env_file: .env
+    volumes:
+      - storage:/var/www/html/storage
+      - ./app:/var/www/html/app
+      - ./database:/var/www/html/database
+      - ./resources:/var/www/html/resources
+      - ./routes:/var/www/html/routes
+      - ./tests:/var/www/html/tests
+      - ./phpunit.xml:/var/www/html/phpunit.xml
+
+  # Queue worker — .env sets QUEUE_CONNECTION=redis, so a consumer must run or
+  # queued jobs are never processed. Shares the app image, code, and storage.
+  worker:
+    image: monica:dev
+    depends_on:
+      - mysql
+      - redis
+      - app
+    env_file: .env
+    command: php artisan queue:work redis --queue=imports,default --tries=3 --sleep=3 --timeout=0
+    restart: unless-stopped
+    volumes:
+      - storage:/var/www/html/storage
+      - ./app:/var/www/html/app
+      - ./database:/var/www/html/database
+      - ./resources:/var/www/html/resources
+      - ./routes:/var/www/html/routes
+      - ./tests:/var/www/html/tests
+      - ./phpunit.xml:/var/www/html/phpunit.xml
+
+  # Required by .env: CACHE_DRIVER=redis and QUEUE_CONNECTION=redis (host "redis").
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+
+  mysql:
+    # Pinned to 8.0: the floating `mysql:8` tag now resolves to 8.4, which removed
+    # the `--default-authentication-plugin` flag below and aborts on startup.
+    image: mysql:8.0
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      - MYSQL_ROOT_PASSWORD=sekret_root_password
+      - MYSQL_DATABASE=monica
+      - MYSQL_USER=homestead
+      - MYSQL_PASSWORD=secret
+    volumes:
+      - /var/lib/mysql
+
+  phpmyadmin:
+    image: phpmyadmin
+    depends_on:
+      - mysql
+    environment:
+      PMA_HOST: mysql
+      PMA_USER: root
+      PMA_PASSWORD: sekret_root_password
+    restart: always
+    ports:
+      - 3000:80
+    volumes:
+      - /sessions
+
+  mail:
+    container_name: fake_mail
+    image: mailhog/mailhog
+    ports:
+      - 8025:8025
+      - 1025:1025
+
+volumes:
+  storage:

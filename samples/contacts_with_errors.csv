@@ -1,0 +1,6 @@
+name,email,phone
+Valid Person,valid@example.com,555-0201
+Bad Email,not-an-email,555-0202
+,missingname@example.com,555-0203
+Another Valid,another@example.com,
+"Quoted, Name",quoted@example.com,555-0205

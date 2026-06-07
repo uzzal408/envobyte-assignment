@@ -6,7 +6,7 @@
 ### This file is based off of the `apache` variant in the above mentioned repo
 ###
 
-FROM php:8.1-apache
+FROM php:8.2-apache
 
 # opencontainers annotations https://github.com/opencontainers/image-spec/blob/master/annotations.md
 LABEL org.opencontainers.image.authors="Alexis Saettler <alexis@saettler.org>" \
@@ -62,28 +62,21 @@ RUN set -ex; \
     ; \
     \
 # pecl will claim success even if one install fails, so we need to perform each install separately
+# (memcached omitted — this dev stack uses Redis for cache and queue; its pecl build
+#  fails on bookworm and the extension is unused here)
     pecl install APCu; \
-    pecl install memcached; \
     pecl install redis; \
     \
     docker-php-ext-enable \
         apcu \
-        memcached \
         redis \
     ; \
     \
-# reset apt-mark's "manual" list so that "purge --auto-remove" will remove all build dependencies
-    apt-mark auto '.*' > /dev/null; \
-    apt-mark manual $savedAptMark; \
-        ldd "$(php -r 'echo ini_get("extension_dir");')"/*.so \
-        | awk '/=>/ { print $3 }' \
-        | sort -u \
-        | xargs -r dpkg-query -S \
-        | cut -d: -f1 \
-        | sort -u \
-        | xargs -rt apt-mark manual; \
-        \
-    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+# NOTE: the upstream image purges the build deps here via an ldd/apt-mark dance
+# meant to keep only the runtime shared libraries. That heuristic is broken in this
+# environment — it strips libpng16/libicu/libzip, leaving gd/intl/zip unable to load
+# their .so at runtime. For this dev image we keep the dev packages installed (larger
+# image, but reliable) instead of the fragile auto-remove.
     rm -rf /var/lib/apt/lists/*
 
 # Set crontab for schedules
@@ -157,14 +150,16 @@ RUN install-composer.sh
 RUN set -ex; \
     \
     mkdir -p storage/framework/views; \
-    composer install --no-interaction --no-progress --no-dev; \
+# dev image: install dev dependencies too (Faker for seeding, PHPUnit for the
+# assignment's required tests). The upstream image uses --no-dev for production.
+    composer install --no-interaction --no-progress; \
     composer clear-cache; \
     rm -rf .composer
 
 # Install node dependencies
 RUN set -ex; \
     \
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash -; \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
     apt-get install -y nodejs; \
     npm install -g yarn; \
     yarn run inst; \

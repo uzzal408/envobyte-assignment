@@ -1,3 +1,141 @@
+<!-- ════════════════════════════════════════════════════════════════════════
+     ENVOBYTE SENIOR BACKEND ASSIGNMENT — submission section.
+     The original Monica README follows below the divider.
+     ════════════════════════════════════════════════════════════════════════ -->
+
+# Reliable Background Import System (Envobyte Assignment)
+
+Redesign of Monica's contact import: from a synchronous, vCard-only, in-request
+import into a **batched background pipeline** (CSV **and** vCard) with progress
+tracking, per-row error isolation, cancellation, idempotency, crash recovery, and
+observability — exposed through the API and driven by a live-progress UI at
+`/settings/import/upload`. Formats sit behind a small driver interface
+(`ContactImportDriver`), so adding another is a single class.
+
+Branch: `envobyte-assignment`. Companion docs:
+[`PROBLEM_ANALYSIS.md`](PROBLEM_ANALYSIS.md) (the "before" picture),
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) (architecture + ADR rationale),
+[`IMPLEMENTATION_STEPS.md`](IMPLEMENTATION_STEPS.md) (per-phase build & verification log).
+
+## What changed (file map)
+
+| Area | File |
+|---|---|
+| Migration | `database/migrations/2026_06_06_120000_create_contact_import_jobs_table.php` |
+| Model | `app/Models/Account/ContactImportJob.php` (`progress_pct`, `estimated_remaining_sec`, `scopeStuck`) |
+| Format drivers | `ContactImportDriver` (interface), `CsvImportDriver`, `VcardImportDriver`, `ContactImportDrivers` (resolver), `CsvContactParser` (`app/Services/Contact/ImportContacts/`) |
+| Services | `InitiateContactImport`, `CreateContactFromRow`, `CancelContactImport` (`app/Services/Contact/ImportContacts/`) |
+| UI | `resources/views/settings/imports/upload.blade.php` (single form, calls the API via the session cookie, live progress bar) |
+| Batch job | `app/Jobs/Contact/ProcessContactImportChunk.php` |
+| API | `app/Http/Controllers/Api/Contact/ApiImportController.php`, `routes/api.php`, `app/Http/Resources/Contact/ImportJob/*` |
+| Commands | `app/Console/Commands/RecoverStuckImports.php`, `CheckImportFailureRate.php` (scheduled in `Console/Kernel.php`) |
+| Config flag | `config/monica.php` → `contact_import_detect_duplicates` |
+| Tests | `tests/Api/ApiImportTest.php`, `tests/Unit/Services/Contact/ImportContacts/CsvContactParserTest.php` |
+
+## Local setup (Docker)
+
+```bash
+docker compose up -d --build          # app, worker, redis, mysql, phpmyadmin, mailhog
+docker compose exec app php artisan setup:test    # seed: admin@admin.com / admin0
+```
+
+- App → http://localhost:8090 · phpMyAdmin → :3000 · Mailhog → :8025
+- The `worker` service runs `queue:work redis --queue=imports,default`; `QUEUE_CONNECTION=redis` makes imports asynchronous. Watch it with `docker compose logs -f worker`.
+- Dev-environment notes (PHP 8.2 / MySQL 8.0 / Node 20 pins, the `nc`/storage-perm fixes) are documented inline in `scripts/docker/Dockerfile`, `entrypoint.sh`, and `docker-compose.yml`.
+
+## API
+
+All endpoints are under `auth:api` (Passport). Get a token in-container:
+`User::find(..)->createToken('cli')->accessToken`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/import` | upload a CSV or vCard → `201` (new) / `200` (duplicate); creates the job and dispatches the batch |
+| GET | `/api/import` | paginated list with `progress_pct` |
+| GET | `/api/import/{id}` | detail: progress %, counts, `estimated_remaining_sec`, first errors |
+| POST | `/api/import/{id}/cancel` | cancel a running import |
+| GET | `/api/import/{id}/errors` | paginated per-row errors `{row, message}` |
+| GET | `/api/import/{id}/errors.csv` | original rows + an `error` column, streamed |
+
+```bash
+curl -F file=@contacts.csv -H "Authorization: Bearer $TOKEN" http://localhost:8090/api/import
+```
+
+## How it works
+
+1. **Upload (`<500ms`)** — `InitiateContactImport` validates, stores the file, streams it once to count rows, hashes it for idempotency, creates a `pending` row, then dispatches a `Bus::batch` of 50-row chunk jobs and flips to `processing`.
+2. **Processing** — each `ProcessContactImportChunk` streams its own slice, creates contacts row-by-row, isolates failures (`{row, message}` recorded, row skipped), and folds counters/errors back under a row-lock transaction. The batch's `then`/`catch`/`finally` settle the final status.
+3. **Tracking** — the progress API reads only the `contact_import_jobs` row (`<50ms`), never the contact rows.
+4. **Resilience** — `imports:recover` (hourly) reconciles/fails crashed imports; `imports:check-failure-rate` (hourly) raises a critical alert when the failure rate exceeds the threshold.
+
+## Running the tests
+
+```bash
+# Single command (the spec's example) — works once the test DB exists:
+docker compose exec app php artisan test --filter Import   # the import tests (15)
+docker compose exec app php artisan test                   # full suite
+
+# Cold checkout / zero setup (also creates + migrate:fresh's monica_test):
+./run-tests.sh
+./run-tests.sh --filter Import
+```
+
+Both run the same suite on the `sync` queue, so the dispatched batch executes
+inline (an import is `completed` by the time the POST returns). `php artisan test`
+is wired up via `tests/bootstrap.php`, which pins the testing values (`sync`
+queue, `array` cache/session, `testing` DB connection) into `$_SERVER` **before**
+the app boots. This is needed because the dev container injects `.env` as real OS
+env vars that land in `$_SERVER`, and Laravel's `env()` reads `$_SERVER` before
+`$_ENV` — so they would otherwise shadow `phpunit.xml`'s `<env force>` and the
+queue would stay `redis` (batch never runs inline). `run-tests.sh` achieves the
+same via explicit `-e` flags and additionally provisions/migrates `monica_test`,
+so reach for it on a fresh checkout; afterwards `php artisan test` runs directly.
+
+**Cache/invalidation behaviour:** N/A by design. Progress is read straight from
+the `contact_import_jobs` row — a single indexed query (ADR 5), never a count of
+contact rows — so there is no cache layer to keep in sync or invalidate. The
+endpoint is fast because of what it *doesn't* read, not because of caching.
+
+## Assumptions
+
+- CSV headers are `name` (required), `email`, `phone` (case-insensitive; extra columns preserved). `name` splits into first/last on the first space.
+- The uploaded file is **kept** on the storage disk (local in dev, S3-ready) so the error CSV can be reconstructed; cleanup is left to a retention policy.
+- Contact creation is **not** idempotent, so crash recovery fails (doesn't re-run) a partial import — the user re-uploads and duplicate detection short-circuits it.
+- "Notify the team" = a `critical` log event; routing to Slack/PagerDuty is a `config/logging.php` channel concern.
+
+## Architecture Decision Records
+
+**ADR 1 — New `contact_import_jobs` table, not extending legacy `import_jobs`.**
+The legacy vCard importer still uses `import_jobs` with different columns. A dedicated table matches the spec's schema, leaves the legacy path untouched, and is trivial to remove. *Consequence:* two import tables coexist; acceptable and clearly scoped.
+
+**ADR 2 — Keep the uploaded file; don't store rows in the DB.**
+The error CSV needs original row data. Re-reading the stored file by row number is cheaper than persisting every row, and the file is needed only on rare, post-completion error downloads. *Trade-off:* storage cost vs DB bloat — storage wins; pairs with an S3 disk at scale.
+
+**ADR 3 — Idempotency via content hash (`file_hash` + `account_id`), feature-flagged.**
+Hashing content (not filename+size+date) catches true duplicates regardless of name. Gated by `monica.contact_import_detect_duplicates` so "let both run" is a config switch. *Consequence:* a re-upload returns the existing job (`200`).
+
+**ADR 4 — `Bus::batch` of 50-row chunks (not one job, not per-row jobs).**
+50 bounds memory and lets one chunk fail without losing the import, while keeping per-job overhead low. `allowFailures(false)` gives the spec's "one fatal failure stops the rest". *Trade-off:* batching vs streaming a single long job — batching enables progress, partial failure, and cancellation.
+
+**ADR 5 — Progress lives in the DB row, read by polling (not Redis, not events).**
+`processed_rows`/`failed_rows`/`status` on the row make the progress endpoint a single indexed read (`<50ms`) and survive restarts, with no extra moving parts. *Trade-off:* DB-polling vs event-driven/websockets — polling is simpler and sufficient; counters use a row lock to avoid lost updates across parallel chunks.
+
+## Trade-offs & production notes
+
+- **At 10×**: chunks scale horizontally (add workers); a dedicated `imports` queue isolates them from `default`. Building the chunk list in-request is O(rows/50) — for very large files, move dispatch itself into a job.
+- **One queue vs per-import queues**: a shared `imports` queue with fair workers is simpler than per-import queues; revisit if a huge import starves others (chunk priorities / more workers).
+- **Rollback**: the feature is additive — drop the migration and remove the routes/services; the legacy importer is untouched. Duplicate detection and the whole CSV path are flag/route-gated.
+- **Debugging a stuck import**: `ContactImportJob::stuck(30)` lists them; `imports:recover` reconciles; `batch_id` links to `job_batches`; structured `contact_import.*` logs carry duration/throughput/failure-rate.
+- **Questioning the requirements**: storing the CSV on S3 (not the DB) is the right call at scale (ADR 2); the schema is S3-ready via the configured disk.
+
+## Reachable via the API & easy to remove
+
+Every capability is exposed under `/api/import` (the project's hard rule). The `/settings/import/upload` page is a thin client over that API — it calls the endpoints with the session's `laravel_token` cookie + CSRF header (no separate token), uploads a CSV or vCard, and polls for live progress. The new code is isolated under `…/ImportContacts/`, `Jobs/Contact/`, and its own table/routes, so it can be lifted out without touching existing behaviour.
+
+---
+
+<!-- ════════════════════ Original Monica README below ════════════════════ -->
+
 <p align="center">
 
 ![Monica's Logo](https://user-images.githubusercontent.com/61099/37693034-5783b3d6-2c93-11e8-80ea-bd78438dcd51.png)

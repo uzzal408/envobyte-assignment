@@ -1,0 +1,6 @@
+name,email,phone
+John Doe,john@example.com,555-0001
+
+Jane Smith,jane@example.com
+Bob,bob@example.com,555-0003,ignored-extra
+"Quoted, Name",quoted@example.com,555-0005

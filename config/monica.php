@@ -210,6 +210,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Contact CSV import — duplicate detection.
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, uploading a file whose content hash matches an existing
+    | import for the same account returns that import instead of starting a new
+    | one (idempotency). Disable to always create a new import.
+    |
+    */
+    'contact_import_detect_duplicates' => env('CONTACT_IMPORT_DETECT_DUPLICATES', true),
+
+    /*
+    |--------------------------------------------------------------------------
     | Enable geolocation service.
     |--------------------------------------------------------------------------
     |

@@ -260,6 +260,16 @@ class Account extends Model
     }
 
     /**
+     * Get the CSV contact import jobs associated with the account.
+     *
+     * @return HasMany
+     */
+    public function contactImportJobs()
+    {
+        return $this->hasMany(ContactImportJob::class)->orderBy('created_at', 'desc');
+    }
+
+    /**
      * Get the import job reports records associated with the account.
      *
      * @return HasMany

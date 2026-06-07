@@ -23,6 +23,14 @@ Route::group(['middleware' => ['auth:api']], function () {
         Route::post('/me/contact', 'ApiMeController@store');
         Route::delete('/me/contact', 'ApiMeController@destroy');
 
+        // Contact CSV imports (background)
+        Route::get('/import', 'Contact\\ApiImportController@index')->name('import');
+        Route::get('/import/{id}', 'Contact\\ApiImportController@show')->name('import.show');
+        Route::get('/import/{id}/errors', 'Contact\\ApiImportController@errors')->name('import.errors');
+        Route::get('/import/{id}/errors.csv', 'Contact\\ApiImportController@errorsCsv')->name('import.errors.csv');
+        Route::post('/import', 'Contact\\ApiImportController@store')->name('import.store');
+        Route::post('/import/{id}/cancel', 'Contact\\ApiImportController@cancel')->name('import.cancel');
+
         // Contacts properties
         Route::put('/contacts/{contact}/work', 'ApiContactController@updateWork');
         Route::put('/contacts/{contact}/food', 'ApiContactController@updateFoodPreferences');
